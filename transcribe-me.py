@@ -2,67 +2,26 @@ import argparse
 import os
 import re
 
-# Punctuation to strip (excludes apostrophe for contractions)
+from faster_whisper import WhisperModel
+
 STRIP_PUNCTUATION = set('!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~')
-
-import soundfile as sf
-import spacy
-import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-
-MODEL_ID = "openai/whisper-large-v3-turbo"
 SENTENCE_ENDINGS = re.compile(r'[.!?]$')
+ABBREVIATIONS = {'mr.', 'mrs.', 'ms.', 'dr.', 'prof.', 'sr.', 'jr.', 'vs.', 'etc.', 'inc.', 'ltd.', 'st.', 'ave.', 'blvd.'}
 
-# Lazy-loaded globals
-_pipe = None
-_nlp = None
-
-
-def get_device():
-    if torch.cuda.is_available():
-        return "cuda", torch.float16
-    if torch.backends.mps.is_available():
-        return "mps", torch.float16
-    return "cpu", torch.float32
+_model = None
 
 
-def get_pipe():
-    global _pipe
-    if _pipe is None:
-        device, dtype = get_device()
-        print(f"Loading model on {device}...")
-
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            MODEL_ID,
-            dtype=dtype,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-            attn_implementation="eager"
-        )
-        model.to(device)
-
-        processor = AutoProcessor.from_pretrained(MODEL_ID)
-
-        _pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            dtype=dtype,
-            device=device,
-            return_timestamps=True
-        )
-    return _pipe
-
-
-def get_nlp():
-    global _nlp
-    if _nlp is None:
-        _nlp = spacy.load("en_core_web_sm")
-    return _nlp
+def get_model(model_size="large-v3-turbo"):
+    global _model
+    if _model is None:
+        print(f"Loading model {model_size}...")
+        _model = WhisperModel(model_size, device="auto", compute_type="auto")
+    return _model
 
 
 def is_sentence_end(word):
+    if word.lower() in ABBREVIATIONS:
+        return False
     return bool(SENTENCE_ENDINGS.search(word))
 
 
@@ -75,30 +34,6 @@ def format_timestamp(secs):
     milliseconds = int((secs_remainder % 1) * 1000)
     seconds = int(secs_remainder)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
-
-
-def capitalize_entities_batch(words_data):
-    """Capitalize named entities in batch for efficiency."""
-    nlp = get_nlp()
-    texts = [w['word'] for w in words_data]
-    full_text = ' '.join(texts)
-
-    doc = nlp(full_text)
-    entity_spans = {(ent.start_char, ent.end_char) for ent in doc.ents}
-
-    result = list(full_text)
-    for start, end in entity_spans:
-        if start < len(result) and result[start].isalpha():
-            result[start] = result[start].upper()
-
-    capitalized_full = ''.join(result)
-
-    # Split back into words preserving original boundaries
-    pos = 0
-    for w in words_data:
-        word_len = len(w['word'])
-        w['word'] = capitalized_full[pos:pos + word_len]
-        pos += word_len + 1  # +1 for space
 
 
 def create_srt_segments(words, max_chars_per_line):
@@ -146,7 +81,6 @@ def create_srt_segments(words, max_chars_per_line):
     if current['words']:
         segments.append(current)
 
-    # Build SRT content efficiently
     lines = []
     for i, seg in enumerate(segments, 1):
         start = format_timestamp(seg['start_time'])
@@ -156,7 +90,7 @@ def create_srt_segments(words, max_chars_per_line):
     return '\n'.join(lines)
 
 
-def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=False):
+def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=False, language="en"):
     os.makedirs('./input', exist_ok=True)
     os.makedirs('./output', exist_ok=True)
 
@@ -165,46 +99,30 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
         print("No files found in ./input")
         return
 
-    pipe = get_pipe()
+    model = get_model()
 
     for filename in files:
         input_path = os.path.join('./input', filename)
         print(f"\nProcessing {filename}...")
 
         try:
-            audio, samplerate = sf.read(input_path)
-        except Exception as e:
-            print(f"Error reading {filename}: {e}")
-            continue
-
-        if len(audio.shape) > 1:
-            audio = audio.mean(axis=1)
-
-        try:
-            result = pipe(
-                {"raw": audio, "sampling_rate": samplerate},
-                chunk_length_s=30,
-                stride_length_s=5,
-                return_timestamps="word",
-                generate_kwargs={
-                    "task": "transcribe",
-                    "return_legacy_cache": False
-                }
+            segments, info = model.transcribe(
+                input_path,
+                language=language,
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
             )
         except Exception as e:
             print(f"Error processing {filename}: {e}")
             continue
 
-        if not isinstance(result, dict):
-            print(f"Unexpected result type for {filename}")
-            continue
-
-        # Extract words with timestamps
         words_with_timestamps = []
-        for chunk in result.get("chunks", []):
-            timestamp = chunk.get('timestamp', [None, None])
-            if timestamp[0] is not None and timestamp[1] is not None:
-                raw_text = chunk.get('text', '').strip()
+        for segment in segments:
+            if segment.words is None:
+                continue
+            for word_info in segment.words:
+                raw_text = word_info.word.strip()
                 text = raw_text
                 if not keep_punctuation:
                     text = ''.join(c for c in text if c not in STRIP_PUNCTUATION)
@@ -213,19 +131,14 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
                 words_with_timestamps.append({
                     'word': text,
                     'raw': raw_text,
-                    'start_time': timestamp[0],
-                    'end_time': timestamp[1]
+                    'start_time': word_info.start,
+                    'end_time': word_info.end
                 })
 
         if not words_with_timestamps:
             print(f"No valid timestamps found for {filename}")
             continue
 
-        # Batch capitalize entities (only if not lowercasing)
-        if not to_lower:
-            capitalize_entities_batch(words_with_timestamps)
-
-        # Generate SRT
         base_name = os.path.splitext(filename)[0]
         srt_path = os.path.join('./output', f"{base_name}_{max_chars_per_line}.srt")
 
@@ -244,9 +157,10 @@ def parse_args():
     parser.add_argument("max_chars", type=int, help="Maximum characters per subtitle line")
     parser.add_argument("--punctuation", action="store_true", help="Keep punctuation in output")
     parser.add_argument("--lowercase", action="store_true", help="Convert all text to lowercase")
+    parser.add_argument("--lang", type=str, default="en", help="Language code (default: en)")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    process_audio_files(args.max_chars, args.punctuation, args.lowercase)
+    process_audio_files(args.max_chars, args.punctuation, args.lowercase, args.lang)
