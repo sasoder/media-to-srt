@@ -1,12 +1,12 @@
 import argparse
 import os
-import re
 
 from faster_whisper import WhisperModel
 
 STRIP_PUNCTUATION = set('!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~')
-SENTENCE_ENDINGS = re.compile(r'[.!?]$')
+SENTENCE_ENDINGS = {'.', '!', '?'}
 ABBREVIATIONS = {'mr.', 'mrs.', 'ms.', 'dr.', 'prof.', 'sr.', 'jr.', 'vs.', 'etc.', 'inc.', 'ltd.', 'st.', 'ave.', 'blvd.'}
+BREAK_BEFORE = {'and', 'but', 'or', 'because', 'although', 'if', 'when', 'while', 'after', 'before'}
 
 _model = None
 
@@ -20,9 +20,10 @@ def get_model(model_size="large-v3-turbo"):
 
 
 def is_sentence_end(word):
-    if word.lower() in ABBREVIATIONS:
+    lower = word.lower()
+    if lower in ABBREVIATIONS:
         return False
-    return bool(SENTENCE_ENDINGS.search(word))
+    return any(word.endswith(p) for p in SENTENCE_ENDINGS)
 
 
 def format_timestamp(secs):
@@ -36,53 +37,175 @@ def format_timestamp(secs):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
 
-def create_srt_segments(words, max_chars_per_line):
-    segments = []
-    current = {
-        'text': '',
-        'start_time': None,
-        'end_time': None,
-        'words': [],
-        'raw_words': []
-    }
+def transform_word(word, keep_punctuation=False, to_lower=False):
+    if not keep_punctuation:
+        word = ''.join(c for c in word if c not in STRIP_PUNCTUATION)
+    if to_lower:
+        word = word.lower()
+    return word
 
-    for word_data in words:
-        word = word_data['word'].strip()
-        raw = word_data.get('raw', word).strip()
-        if not word:
-            continue
 
-        if not current['words']:
-            current['start_time'] = word_data['start_time']
-            current['text'] = word
-            current['words'].append(word)
-            current['raw_words'].append(raw)
-            current['end_time'] = word_data['end_time']
-            continue
+def find_best_split_point(words, max_chars):
+    """Find the best index to split a list of word dicts, respecting max_chars."""
+    text = ''
+    last_fits = 0
+    break_points = []  # (index, char_count) of potential break points
 
-        test_text = current['text'] + ' ' + word
-        prev_raw = current['raw_words'][-1] if current['raw_words'] else ''
+    for i, w in enumerate(words):
+        word = w['display']
+        test = text + (' ' if text else '') + word
 
-        if is_sentence_end(prev_raw) or len(test_text) > max_chars_per_line:
-            segments.append(current)
-            current = {
-                'text': word,
-                'start_time': word_data['start_time'],
-                'end_time': word_data['end_time'],
-                'words': [word],
-                'raw_words': [raw]
-            }
+        if len(test) <= max_chars:
+            last_fits = i + 1
+            text = test
+
+            # Track potential break points (but not if current word is also a break word)
+            word_lower = word.lower().strip('.,!?')
+            if word_lower not in BREAK_BEFORE:
+                if i + 1 < len(words):
+                    next_lower = words[i + 1]['display'].lower().strip('.,!?')
+                    if next_lower in BREAK_BEFORE:
+                        break_points.append((i + 1, len(text)))
+                if word.endswith(','):
+                    break_points.append((i + 1, len(text)))
         else:
-            current['text'] = test_text
-            current['words'].append(word)
-            current['raw_words'].append(raw)
-            current['end_time'] = word_data['end_time']
+            # Exceeded max_chars - find best break point
+            if break_points:
+                # Prefer break points that leave at least 30% on each side
+                min_chars = max_chars * 0.3
+                good_breaks = [(idx, chars) for idx, chars in break_points
+                               if chars >= min_chars and idx <= last_fits]
+                if good_breaks:
+                    # Take the latest good break (closest to limit without going over)
+                    return good_breaks[-1][0]
+                # Otherwise take any valid break
+                valid = [(idx, chars) for idx, chars in break_points if idx <= last_fits]
+                if valid:
+                    return valid[-1][0]
+            return last_fits if last_fits > 0 else 1
 
-    if current['words']:
-        segments.append(current)
+    return len(words)
 
+
+def split_long_segment(segment, max_chars):
+    """Split a segment that exceeds max_chars into smaller pieces."""
+    words = segment['words']
+
+    # If it fits, return as-is
+    if len(segment['text']) <= max_chars:
+        return [segment]
+
+    # If only one word, can't split further
+    if len(words) <= 1:
+        return [segment]
+
+    results = []
+    remaining = words[:]
+
+    while remaining:
+        # Check if remaining fits
+        remaining_text = ' '.join(w['display'] for w in remaining)
+        if len(remaining_text) <= max_chars:
+            results.append({
+                'text': remaining_text,
+                'start_time': remaining[0]['start_time'],
+                'end_time': remaining[-1]['end_time'],
+                'words': remaining
+            })
+            break
+
+        # Find best split point
+        split_idx = find_best_split_point(remaining, max_chars)
+
+        if split_idx == 0:
+            split_idx = 1  # Force at least one word
+
+        left = remaining[:split_idx]
+        remaining = remaining[split_idx:]
+
+        results.append({
+            'text': ' '.join(w['display'] for w in left),
+            'start_time': left[0]['start_time'],
+            'end_time': left[-1]['end_time'],
+            'words': left
+        })
+
+    return results
+
+
+def create_srt_segments(words, max_chars_per_line, pause_threshold=0.4, keep_punctuation=False, to_lower=False):
+    # Phase 1: Build segments using natural breaks only (pause + sentence)
+    segments = []
+    current_words = []
+
+    for i, word_data in enumerate(words):
+        raw_word = word_data['word'].strip()
+        display_word = transform_word(raw_word, keep_punctuation, to_lower)
+        if not display_word:
+            continue
+
+        word_entry = {
+            'raw': raw_word,
+            'display': display_word,
+            'start_time': word_data['start_time'],
+            'end_time': word_data['end_time']
+        }
+
+        should_break = False
+
+        if current_words:
+            # 1. Pause detection
+            gap = word_data['start_time'] - current_words[-1]['end_time']
+            if gap >= pause_threshold:
+                should_break = True
+
+            # 2. Sentence boundary
+            if not should_break and is_sentence_end(current_words[-1]['raw']):
+                should_break = True
+
+        if should_break and current_words:
+            segments.append({
+                'text': ' '.join(w['display'] for w in current_words),
+                'start_time': current_words[0]['start_time'],
+                'end_time': current_words[-1]['end_time'],
+                'words': current_words
+            })
+            current_words = []
+
+        current_words.append(word_entry)
+
+    if current_words:
+        segments.append({
+            'text': ' '.join(w['display'] for w in current_words),
+            'start_time': current_words[0]['start_time'],
+            'end_time': current_words[-1]['end_time'],
+            'words': current_words
+        })
+
+    # Phase 2: Split any segments that exceed max_chars
+    split_segments = []
+    for seg in segments:
+        split_segments.extend(split_long_segment(seg, max_chars_per_line))
+
+    # Phase 3: Merge orphans (1-2 word segments) into previous segment
+    # But don't merge if orphan starts with capital (new sentence)
+    final_segments = []
+    for seg in split_segments:
+        word_count = len(seg['words'])
+        first_raw = seg['words'][0]['raw'] if seg['words'] else ''
+        starts_sentence = first_raw and first_raw[0].isupper()
+
+        if word_count <= 2 and final_segments and not starts_sentence:
+            prev = final_segments[-1]
+            prev['text'] += ' ' + seg['text']
+            prev['end_time'] = seg['end_time']
+            prev['words'] = prev['words'] + seg['words']
+        else:
+            final_segments.append(seg)
+
+    # Generate SRT output
     lines = []
-    for i, seg in enumerate(segments, 1):
+    for i, seg in enumerate(final_segments, 1):
         start = format_timestamp(seg['start_time'])
         end = format_timestamp(seg['end_time'])
         lines.append(f"{i}\n{start} --> {end}\n{seg['text']}\n")
@@ -90,7 +213,7 @@ def create_srt_segments(words, max_chars_per_line):
     return '\n'.join(lines)
 
 
-def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=False, language="en"):
+def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=False, language="en", pause_threshold=0.4):
     os.makedirs('./input', exist_ok=True)
     os.makedirs('./output', exist_ok=True)
 
@@ -106,7 +229,7 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
         print(f"\nProcessing {filename}...")
 
         try:
-            segments, info = model.transcribe(
+            segments, _ = model.transcribe(
                 input_path,
                 language=language,
                 word_timestamps=True,
@@ -122,15 +245,8 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
             if segment.words is None:
                 continue
             for word_info in segment.words:
-                raw_text = word_info.word.strip()
-                text = raw_text
-                if not keep_punctuation:
-                    text = ''.join(c for c in text if c not in STRIP_PUNCTUATION)
-                if to_lower:
-                    text = text.lower()
                 words_with_timestamps.append({
-                    'word': text,
-                    'raw': raw_text,
+                    'word': word_info.word.strip(),
                     'start_time': word_info.start,
                     'end_time': word_info.end
                 })
@@ -140,10 +256,16 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
             continue
 
         base_name = os.path.splitext(filename)[0]
-        srt_path = os.path.join('./output', f"{base_name}_{max_chars_per_line}.srt")
+        srt_path = os.path.join('./output', f"{base_name}_c{max_chars_per_line}_p{pause_threshold}.srt")
 
         try:
-            srt_content = create_srt_segments(words_with_timestamps, max_chars_per_line)
+            srt_content = create_srt_segments(
+                words_with_timestamps,
+                max_chars_per_line,
+                pause_threshold,
+                keep_punctuation,
+                to_lower
+            )
             with open(srt_path, 'w', encoding='utf-8') as f:
                 f.write(srt_content)
             print(f"Saved: {srt_path}")
@@ -154,13 +276,15 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Transcribe audio files to SRT subtitles")
-    parser.add_argument("max_chars", type=int, help="Maximum characters per subtitle line")
-    parser.add_argument("--punctuation", action="store_true", help="Keep punctuation in output")
+    parser.add_argument("--chars", type=int, default=60, help="Max characters per subtitle line (default: 60)")
+    parser.add_argument("--no-punctuation", action="store_true", help="Strip punctuation from output")
     parser.add_argument("--lowercase", action="store_true", help="Convert all text to lowercase")
     parser.add_argument("--lang", type=str, default="en", help="Language code (default: en)")
+    parser.add_argument("--pause", type=float, default=0.5, help="Pause threshold in seconds (default: 0.5)")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    process_audio_files(args.max_chars, args.punctuation, args.lowercase, args.lang)
+    keep_punctuation = not args.no_punctuation
+    process_audio_files(args.chars, keep_punctuation, args.lowercase, args.lang, args.pause)

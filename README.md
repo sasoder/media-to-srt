@@ -1,14 +1,13 @@
 # media-to-srt
 
-Transcribe audio files to SRT subtitles using OpenAI's Whisper model.
+Transcribe audio files to SRT subtitles using Whisper.
 
 ## Features
 
 - Word-level timestamps for accurate subtitle sync
-- Sentence boundary detection (new sentences start new captions)
-- Named entity capitalization via spaCy NER
-- Configurable character limit per subtitle line
-- Optional punctuation preservation
+- Smart segmentation: breaks at natural pauses and sentence boundaries
+- Splits long lines at conjunctions (and, but, if, when, etc.) not mid-phrase
+- Orphan prevention: merges 1-2 word fragments into previous line
 - Supports CUDA, MPS (Apple Silicon), and CPU
 
 ## Installation
@@ -22,37 +21,41 @@ uv sync
 Place audio files in `./input/`, then run:
 
 ```bash
-uv run python transcribe-me.py <max_chars> [options]
+uv run python transcribe-me.py
 ```
 
-### Arguments
+That's it. Sensible defaults are applied.
 
-| Argument | Description |
-|----------|-------------|
-| `max_chars` | Maximum characters per subtitle line |
-| `--punctuation` | Keep punctuation in output |
-| `--lowercase` | Convert all text to lowercase (skips NER) |
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--chars` | 60 | Max characters per subtitle line |
+| `--pause` | 0.5 | Pause threshold (seconds) for segment breaks |
+| `--no-punctuation` | off | Strip punctuation from output |
+| `--lowercase` | off | Convert all text to lowercase |
+| `--lang` | en | Language code |
 
 ### Examples
 
 ```bash
-# Basic usage - 40 chars per line, no punctuation, NER capitalization
-uv run python transcribe-me.py 40
+# Use defaults (60 chars, punctuation kept, 0.5s pause)
+uv run python transcribe-me.py
 
-# Keep punctuation
-uv run python transcribe-me.py 40 --punctuation
+# Shorter lines for mobile
+uv run python transcribe-me.py --chars 42
 
-# Lowercase output
-uv run python transcribe-me.py 40 --lowercase
+# More aggressive breaks at pauses
+uv run python transcribe-me.py --pause 0.3
 
-# Both flags
-uv run python transcribe-me.py 60 --punctuation --lowercase
+# Strip punctuation and lowercase (for lyric-style captions)
+uv run python transcribe-me.py --no-punctuation --lowercase
 ```
 
 ## Output
 
-SRT files are saved to `./output/` with the naming format: `{input_name}_{max_chars}.srt`
+SRT files are saved to `./output/` with format: `{input_name}_c{chars}_p{pause}.srt`
 
 ## Model
 
-Uses `openai/whisper-large-v3-turbo` for transcription.
+Uses `large-v3-turbo` via faster-whisper.
