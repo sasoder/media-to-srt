@@ -188,14 +188,21 @@ def create_srt_segments(words, max_chars_per_line, pause_threshold=0.4, keep_pun
         split_segments.extend(split_long_segment(seg, max_chars_per_line))
 
     # Phase 3: Merge orphans (1-2 word segments) into previous segment
-    # But don't merge if orphan starts with capital (new sentence)
+    # But don't merge if: starts with capital (new sentence) or would exceed 1.5x max
     final_segments = []
     for seg in split_segments:
         word_count = len(seg['words'])
         first_raw = seg['words'][0]['raw'] if seg['words'] else ''
         starts_sentence = first_raw and first_raw[0].isupper()
 
-        if word_count <= 2 and final_segments and not starts_sentence:
+        can_merge = (
+            word_count <= 2
+            and final_segments
+            and not starts_sentence
+            and len(final_segments[-1]['text']) + len(seg['text']) + 1 <= max_chars_per_line * 1.5
+        )
+
+        if can_merge:
             prev = final_segments[-1]
             prev['text'] += ' ' + seg['text']
             prev['end_time'] = seg['end_time']
