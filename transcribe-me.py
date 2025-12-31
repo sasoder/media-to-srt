@@ -3,7 +3,7 @@ import os
 
 from faster_whisper import WhisperModel
 
-STRIP_PUNCTUATION = set('!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~')
+STRIP_PUNCTUATION = set('"#$%&()*+,-./:;<=>@[\\]^_`{|}~')
 SENTENCE_ENDINGS = {'.', '!', '?'}
 ABBREVIATIONS = {'mr.', 'mrs.', 'ms.', 'dr.', 'prof.', 'sr.', 'jr.', 'vs.', 'etc.', 'inc.', 'ltd.', 'st.', 'ave.', 'blvd.'}
 BREAK_BEFORE = {'and', 'but', 'or', 'because', 'although', 'if', 'when', 'while', 'after', 'before'}
