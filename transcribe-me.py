@@ -210,6 +210,10 @@ def create_srt_segments(words, max_chars_per_line, pause_threshold=0.4, keep_pun
         else:
             final_segments.append(seg)
 
+    # Extend each subtitle's end time to the next subtitle's start time (no gaps)
+    for i in range(len(final_segments) - 1):
+        final_segments[i]['end_time'] = final_segments[i + 1]['start_time']
+
     # Generate SRT output
     lines = []
     for i, seg in enumerate(final_segments, 1):
@@ -283,9 +287,8 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Transcribe audio files to SRT subtitles")
-    parser.add_argument("-c", "--chars", type=int, default=60, help="Max characters per subtitle line (default: 60)")
-    parser.add_argument("-n", "--no-punctuation", action="store_true", help="Strip punctuation from output")
-    parser.add_argument("-L", "--lowercase", action="store_true", help="Convert all text to lowercase")
+    parser.add_argument("chars", type=int, nargs="?", default=60, help="Max characters per subtitle line (default: 60)")
+    parser.add_argument("-P", "--proper", action="store_true", help="Enable punctuation and proper capitalization")
     parser.add_argument("-l", "--lang", type=str, default=None, help="Language code (auto-detect if not specified)")
     parser.add_argument("-p", "--pause", type=float, default=0.5, help="Pause threshold in seconds (default: 0.5)")
     return parser.parse_args()
@@ -293,5 +296,6 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    keep_punctuation = not args.no_punctuation
-    process_audio_files(args.chars, keep_punctuation, args.lowercase, args.lang, args.pause)
+    keep_punctuation = args.proper
+    to_lower = not args.proper
+    process_audio_files(args.chars, keep_punctuation, to_lower, args.lang, args.pause)

@@ -8,6 +8,8 @@ Transcribe audio files to SRT subtitles using Whisper.
 - Smart segmentation: breaks at natural pauses and sentence boundaries
 - Splits long lines at conjunctions (and, but, if, when, etc.) not mid-phrase
 - Orphan prevention: merges 1-2 word fragments into previous line
+- Continuous subtitles: no gaps between captions
+- Auto language detection
 - Supports CUDA, MPS (Apple Silicon), and CPU
 
 ## Installation
@@ -24,32 +26,34 @@ Place audio files in `./input/`, then run:
 uv run python transcribe-me.py
 ```
 
-That's it. Sensible defaults are applied.
+Default output: lowercase, no punctuation (clean caption style).
 
 ### Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--chars` | 60 | Max characters per subtitle line |
-| `--pause` | 0.5 | Pause threshold (seconds) for segment breaks |
-| `--no-punctuation` | off | Strip punctuation from output |
-| `--lowercase` | off | Convert all text to lowercase |
-| `--lang` | en | Language code |
+| `chars` | 60 | Max characters per subtitle line (positional) |
+| `-P, --proper` | off | Enable punctuation and proper capitalization |
+| `-l, --lang` | auto | Language code (auto-detected if not specified) |
+| `-p, --pause` | 0.5 | Pause threshold (seconds) for segment breaks |
 
 ### Examples
 
 ```bash
-# Use defaults (60 chars, punctuation kept, 0.5s pause)
+# Default (60 chars, lowercase, no punctuation)
 uv run python transcribe-me.py
 
-# Shorter lines for mobile
-uv run python transcribe-me.py --chars 42
+# 40 character lines
+uv run python transcribe-me.py 40
 
-# More aggressive breaks at pauses
-uv run python transcribe-me.py --pause 0.3
+# Proper capitalization and punctuation
+uv run python transcribe-me.py 50 -P
 
-# Strip punctuation and lowercase (for lyric-style captions)
-uv run python transcribe-me.py --no-punctuation --lowercase
+# Force Spanish language
+uv run python transcribe-me.py 60 -l es
+
+# Short lines with tight pause breaks
+uv run python transcribe-me.py 35 -p 0.3
 ```
 
 ## Output
