@@ -283,11 +283,11 @@ def process_audio_files(max_chars_per_line, keep_punctuation=False, to_lower=Fal
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Transcribe audio files to SRT subtitles")
-    parser.add_argument("--chars", type=int, default=60, help="Max characters per subtitle line (default: 60)")
-    parser.add_argument("--no-punctuation", action="store_true", help="Strip punctuation from output")
-    parser.add_argument("--lowercase", action="store_true", help="Convert all text to lowercase")
-    parser.add_argument("--lang", type=str, default="en", help="Language code (default: en)")
-    parser.add_argument("--pause", type=float, default=0.5, help="Pause threshold in seconds (default: 0.5)")
+    parser.add_argument("-c", "--chars", type=int, default=60, help="Max characters per subtitle line (default: 60)")
+    parser.add_argument("-n", "--no-punctuation", action="store_true", help="Strip punctuation from output")
+    parser.add_argument("-L", "--lowercase", action="store_true", help="Convert all text to lowercase")
+    parser.add_argument("-l", "--lang", type=str, default=None, help="Language code (auto-detect if not specified)")
+    parser.add_argument("-p", "--pause", type=float, default=0.5, help="Pause threshold in seconds (default: 0.5)")
     return parser.parse_args()
 
 
